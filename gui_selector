@@ -1,0 +1,397 @@
+import os
+import sys
+import tkinter as tk
+from tkinter import ttk, messagebox
+import threading
+import winreg
+import ctypes
+
+
+class NVMGui:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("NVM Node.js Selector")
+        self.root.resizable(False, False)
+        
+        # Pencere boyutu
+        window_width = 420
+        window_height = 380
+        
+        # Ekran ortasına konumlandır
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        self.root.geometry(f"{window_width}x{window_height}+{x}+{y}")
+        
+        # NVM Home
+        self.nvm_home = os.getenv("NVM_HOME", "")
+        
+        self.setup_ui()
+        self.load_versions()
+    
+    def setup_ui(self):
+        """UI bileşenlerini oluştur"""
+        main_frame = ttk.Frame(self.root, padding=20)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Başlık
+        title_label = ttk.Label(
+            main_frame, 
+            text="🟢 Node.js Version Selector", 
+            font=("Segoe UI", 14, "bold")
+        )
+        title_label.pack(pady=(0, 5))
+        
+        # Alt başlık
+        subtitle_label = ttk.Label(
+            main_frame,
+            text="Kurulu versiyona çift tıklayarak aktif edin. Versiyon kurulumu için cmd üzerinden (nvm install) kullanın.",
+            font=("Segoe UI", 9),
+            foreground="black",
+            wraplength=400,        # ← metni 400 px’de kaydır
+            justify="left"         # ← satır hizası (left / center)
+        )
+        subtitle_label.pack(pady=(0, 15))
+        
+        # Mevcut versiyon
+        current_frame = ttk.LabelFrame(main_frame, text="Aktif Sürüm", padding=10)
+        current_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        self.current_version_var = tk.StringVar(value="Yükleniyor...")
+        self.current_version_label = ttk.Label(
+            current_frame, 
+            textvariable=self.current_version_var, 
+            font=("Segoe UI", 11, "bold"),
+            foreground="#2e7d32"
+        )
+        self.current_version_label.pack()
+        
+        # Versiyon listesi
+        list_frame = ttk.LabelFrame(main_frame, text="Kurulu Sürümler", padding=10)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 15))
+        
+        # Listbox ve scrollbar
+        list_container = ttk.Frame(list_frame)
+        list_container.pack(fill=tk.BOTH, expand=True)
+        
+        scrollbar = ttk.Scrollbar(list_container)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        self.version_listbox = tk.Listbox(
+            list_container,
+            font=("Consolas", 12),
+            selectmode=tk.SINGLE,
+            yscrollcommand=scrollbar.set,
+            activestyle='dotbox',
+            selectbackground='#1976d2',
+            selectforeground='white'
+        )
+        self.version_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.version_listbox.yview)
+        
+        # Çift tıklama ile seçim
+        self.version_listbox.bind('<Double-Button-1>', lambda e: self.use_selected_version())
+        
+        # Butonlar
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X)
+        
+        self.use_button = ttk.Button(
+            button_frame,
+            text="⚡ Set / Use",
+            command=self.use_selected_version
+        )
+        self.use_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 5))
+        
+        refresh_button = ttk.Button(
+            button_frame,
+            text="↻ Yenile",
+            command=self.load_versions
+        )
+        refresh_button.pack(side=tk.RIGHT)
+        
+        # Status bar
+        self.status_var = tk.StringVar(value="Hazır")
+        status_bar = ttk.Label(
+            main_frame, 
+            textvariable=self.status_var, 
+            font=("Segoe UI", 9),
+            foreground="gray"
+        )
+        status_bar.pack(pady=(10, 0))
+    
+    def get_user_path(self):
+        """User PATH değerini oku"""
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Environment",
+                0,
+                winreg.KEY_READ
+            )
+            value, _ = winreg.QueryValueEx(key, "Path")
+            winreg.CloseKey(key)
+            return value
+        except:
+            return ""
+    
+    def set_user_path(self, new_path):
+        """User PATH değerini ayarla"""
+        try:
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Environment",
+                0,
+                winreg.KEY_ALL_ACCESS
+            )
+            winreg.SetValueEx(key, "Path", 0, winreg.REG_EXPAND_SZ, new_path)
+            winreg.CloseKey(key)
+            
+            # Değişikliği broadcast et
+            self.broadcast_environment_change()
+            return True
+        except Exception as e:
+            print(f"PATH ayarlama hatası: {e}")
+            return False
+    
+    def broadcast_environment_change(self):
+        """Ortam değişkeni değişikliğini sisteme bildir"""
+        try:
+            HWND_BROADCAST = 0xFFFF
+            WM_SETTINGCHANGE = 0x1A
+            SMTO_ABORTIFHUNG = 0x0002
+            
+            result = ctypes.c_long()
+            ctypes.windll.user32.SendMessageTimeoutW(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                0,
+                "Environment",
+                SMTO_ABORTIFHUNG,
+                5000,
+                ctypes.byref(result)
+            )
+        except:
+            pass
+    
+    def get_node_versions(self):
+        """Kurulu Node versiyonlarını bul"""
+        versions = []
+        
+        if not self.nvm_home or not os.path.exists(self.nvm_home):
+            return versions
+        
+        for item in os.listdir(self.nvm_home):
+            item_path = os.path.join(self.nvm_home, item)
+            if os.path.isdir(item_path):
+                # node.exe var mı kontrol et
+                if os.path.exists(os.path.join(item_path, "node.exe")):
+                    versions.append(item)
+        
+        # Sırala (en yeni üstte)
+        try:
+            versions.sort(
+                key=lambda v: [int(x) for x in v.lstrip('v').split('.')[:3] if x.isdigit()], 
+                reverse=True
+            )
+        except:
+            versions.sort(reverse=True)
+        
+        return versions
+    
+    def get_active_version(self):
+        """PATH'teki aktif Node versiyonunu bul"""
+        user_path = self.get_user_path()
+        
+        if not self.nvm_home:
+            return None
+        
+        # PATH'te NVM klasörlerinden hangisi var?
+        path_parts = user_path.split(';')
+        
+        for part in path_parts:
+            part = part.strip()
+            if self.nvm_home.lower() in part.lower():
+                # Bu bir NVM Node klasörü mü?
+                if os.path.exists(os.path.join(part, "node.exe")):
+                    # Versiyon adını çıkar
+                    return os.path.basename(part)
+        
+        return None
+    
+    def load_versions(self):
+        """Kurulu versiyonları yükle"""
+        self.status_var.set("Sürümler yükleniyor...")
+        self.version_listbox.delete(0, tk.END)
+        self.root.update()
+        
+        def load():
+            versions = self.get_node_versions()
+            current_version = self.get_active_version()
+            
+            # UI güncelle (ana thread'de)
+            self.root.after(0, lambda: self.update_ui(versions, current_version))
+        
+        thread = threading.Thread(target=load, daemon=True)
+        thread.start()
+    
+    def update_ui(self, versions, current_version):
+        """UI'ı güncelle"""
+        self.version_listbox.delete(0, tk.END)
+        
+        if versions:
+            for i, v in enumerate(versions):
+                is_active = (v == current_version)
+                if is_active:
+                    display = f"► {v} (aktif)"
+                else:
+                    display = f"   {v}"
+                self.version_listbox.insert(tk.END, display)
+                
+                # Aktif olanı yeşil yap
+                if is_active:
+                    self.version_listbox.itemconfig(i, fg='#2e7d32', selectforeground='white')
+            
+            if current_version:
+                self.current_version_var.set(f"Node.js {current_version}")
+            else:
+                self.current_version_var.set("Listeden Node versiyonu seşiniz...")
+            
+            self.status_var.set(f"{len(versions)} sürüm bulundu")
+        else:
+            self.version_listbox.insert(tk.END, "  Kurulu sürüm yok")
+            self.current_version_var.set("Kurulu değil")
+            self.status_var.set("nvm install <version> ile sürüm kurun")
+    
+    def use_selected_version(self):
+        """Seçili versiyona geç (PATH manipulation)"""
+        selection = self.version_listbox.curselection()
+        if not selection:
+            messagebox.showwarning("Uyarı", "Lütfen bir sürüm seçin!")
+            return
+        
+        selected = self.version_listbox.get(selection[0])
+        
+        # Versiyon numarasını çıkar
+        version = selected.replace('►', '').replace('(aktif)', '').strip()
+        
+        if not version:
+            return
+        
+        self.status_var.set(f"{version} sürümüne geçiliyor...")
+        self.use_button.config(state='disabled')
+        self.root.update()
+        
+        def switch():
+            success, message = self.switch_node_version(version)
+            self.root.after(0, lambda: self.switch_complete(version, success, message))
+        
+        thread = threading.Thread(target=switch, daemon=True)
+        thread.start()
+    
+    def switch_node_version(self, version):
+        """Node versiyonunu PATH manipulation ile değiştir"""
+        try:
+            if not self.nvm_home:
+                return False, "NVM_HOME bulunamadı"
+            
+            # Yeni versiyon klasörü
+            new_node_path = os.path.join(self.nvm_home, version)
+            
+            if not os.path.exists(new_node_path):
+                return False, f"Versiyon klasörü bulunamadı: {new_node_path}"
+            
+            if not os.path.exists(os.path.join(new_node_path, "node.exe")):
+                return False, f"node.exe bulunamadı: {new_node_path}"
+            
+            # Mevcut PATH'i al
+            user_path = self.get_user_path()
+            path_parts = user_path.split(';')
+            
+            # Eski NVM Node yollarını çıkar
+            new_path_parts = []
+            for part in path_parts:
+                part = part.strip()
+                if not part:
+                    continue
+                
+                # Bu bir NVM Node klasörü mü?
+                if self.nvm_home.lower() in part.lower():
+                    # node.exe içeren NVM klasörlerini atla
+                    check_path = part
+                    # %NVM_HOME% gibi değişkenleri çöz
+                    check_path = os.path.expandvars(check_path)
+                    if os.path.exists(os.path.join(check_path, "node.exe")):
+                        continue  # Bu eski Node yolu, atla
+                
+                new_path_parts.append(part)
+            
+            # Yeni Node yolunu başa ekle
+            new_path_parts.insert(0, new_node_path)
+            
+            # PATH'i güncelle
+            new_path = ';'.join(new_path_parts)
+            
+            if self.set_user_path(new_path):
+                return True, f"{version} aktif edildi"
+            else:
+                return False, "PATH güncellenemedi"
+                
+        except Exception as e:
+            return False, str(e)
+    
+    def switch_complete(self, version, success, message):
+        """Geçiş tamamlandı"""
+        self.use_button.config(state='normal')
+        
+        if success:
+            self.status_var.set(f"✓ {version} aktif edildi")
+            self.current_version_var.set(f"Node.js {version}")
+            messagebox.showinfo(
+                "Başarılı", 
+                f"Node.js {version} aktif edildi!\n\n"
+                f"⚠️ Yeni terminal penceresi açın.\n"
+                f"Mevcut terminaller eski PATH'i kullanmaya devam eder."
+            )
+            self.load_versions()
+        else:
+            self.status_var.set("✗ Geçiş başarısız")
+            messagebox.showerror("Hata", f"Sürüm değiştirilemedi:\n\n{message}")
+    
+    def run(self):
+        """Uygulamayı başlat"""
+        self.root.mainloop()
+
+
+def main():
+    # NVM kurulu mu kontrol et
+    nvm_home = os.getenv("NVM_HOME")
+    
+    if not nvm_home:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "NVM Bulunamadı",
+            "NVM_HOME ortam değişkeni ayarlanmamış.\n\n"
+            "Lütfen önce NVM kurulum scriptini çalıştırın."
+        )
+        sys.exit(1)
+    
+    if not os.path.exists(nvm_home):
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "NVM Bulunamadı",
+            f"NVM klasörü bulunamadı:\n{nvm_home}\n\n"
+            "Lütfen önce NVM kurulum scriptini çalıştırın."
+        )
+        sys.exit(1)
+    
+    app = NVMGui()
+    app.run()
+
+
+if __name__ == "__main__":
+    main()
+
